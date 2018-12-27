@@ -37,12 +37,9 @@ flags = tf.flags
 
 FLAGS = flags.FLAGS
 
-if os.name == 'nt':
-    bert_path = 'H:\迅雷下载\chinese_L-12_H-768_A-12\chinese_L-12_H-768_A-12'
-    root_path = r'C:\workspace\python\BERT-BiLSMT-CRF-NER'
-else:
-    bert_path = '/home/macan/ml/data/chinese_L-12_H-768_A-12/'
-    root_path = '/home/macan/ml/workspace/BERT-BiLSTM-CRF-NER'
+
+bert_path = '/home/wei/dev/bert/chinese_L-12_H-768_A-12'
+root_path = '/home/wei/dev/BERT-BiLSTM-CRF-NER'
 
 flags.DEFINE_string(
     "data_dir", os.path.join(root_path, 'NERdata'),
@@ -79,7 +76,7 @@ flags.DEFINE_integer(
     "The maximum total input sequence length after WordPiece tokenization."
 )
 
-flags.DEFINE_boolean('clean', True, 'remove the files which created by last training')
+flags.DEFINE_boolean('clean', False, 'remove the files which created by last training')
 
 flags.DEFINE_bool("do_train", True, "Whether to run training."
 )
@@ -89,7 +86,7 @@ flags.DEFINE_bool("do_eval", True, "Whether to run eval on the dev set.")
 
 flags.DEFINE_bool("do_predict", True, "Whether to run the model in inference mode on the test set.")
 
-flags.DEFINE_integer("train_batch_size", 64, "Total batch size for training.")
+flags.DEFINE_integer("train_batch_size", 16, "Total batch size for training.")
 
 flags.DEFINE_integer("eval_batch_size", 8, "Total batch size for eval.")
 
@@ -105,10 +102,10 @@ flags.DEFINE_float(
     "Proportion of training to perform linear learning rate warmup for. "
     "E.g., 0.1 = 10% of training.")
 
-flags.DEFINE_integer("save_checkpoints_steps", 1000,
+flags.DEFINE_integer("save_checkpoints_steps", 500,
                      "How often to save the model checkpoint.")
 
-flags.DEFINE_integer("iterations_per_loop", 1000,
+flags.DEFINE_integer("iterations_per_loop", 500,
                      "How many steps to make in each estimator call.")
 
 flags.DEFINE_string("vocab_file", os.path.join(bert_path, 'vocab.txt'),
@@ -118,14 +115,15 @@ tf.flags.DEFINE_string("master", None, "[Optional] TensorFlow master URL.")
 flags.DEFINE_integer(
     "num_tpu_cores", 8,
     "Only used if `use_tpu` is True. Total number of TPU cores to use.")
-flags.DEFINE_string('data_config_path', os.path.join(root_path, 'data.conf'),
+flags.DEFINE_string('data_config_path', os.path.join(root_path,
+                                                     'data_config'),
                     'data config file, which save train and dev config')
 # lstm parame
 flags.DEFINE_integer('lstm_size', 128, 'size of lstm units')
 flags.DEFINE_integer('num_layers', 1, 'number of rnn layers, default is 1')
 flags.DEFINE_string('cell', 'lstm', 'which rnn cell used')
-
-
+flags.DEFINE_bool('crf_only', True, 'USE only CRF layer after BERT instead of '
+                                     'BiLSTM+CRF')
 
 
 class InputExample(object):
@@ -144,6 +142,7 @@ class InputExample(object):
         self.guid = guid
         self.text = text
         self.label = label
+
 
 class InputFeatures(object):
     """A single set of features of data."""
@@ -201,6 +200,21 @@ class DataProcessor(object):
 
 
 class NerProcessor(DataProcessor):
+
+    label_map ={
+        "O": 1,
+        "B-PER": 1,
+        "I-PER": 2,
+        "B-ORG": 3,
+        "I-ORG": 4,
+        "B-LOC": 5,
+        "I-LOC": 6,
+        "X": 7,
+        "[CLS]": 8,
+        "[SEP]": 9
+
+    }
+
     def get_train_examples(self, data_dir):
         return self._create_example(
             self._read_data(os.path.join(data_dir, "train.txt")), "train"
@@ -215,8 +229,11 @@ class NerProcessor(DataProcessor):
         return self._create_example(
             self._read_data(os.path.join(data_dir, "test.txt")), "test")
 
-    def get_labels(self):
-        return ["O", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC", "X", "[CLS]", "[SEP]"]
+    # def get_labels(self):
+    #     return ["O", "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC", "X", "[CLS]", "[SEP]"]
+
+    def get_label_map(self,):
+        return self.label_map
 
     def _create_example(self, lines, set_type):
         examples = []
@@ -247,59 +264,48 @@ def write_tokens(tokens, mode):
         wf.close()
 
 
-def convert_single_example(ex_index, example, label_list, max_seq_length, tokenizer, mode):
+def convert_single_example(ex_index, example, label_map, max_seq_length, tokenizer, mode):
     """
     将一个样本进行分析，然后将字转化为id, 标签转化为id,然后结构化到InputFeatures对象中
     :param ex_index: index
     :param example: 一个样本
-    :param label_list: 标签列表
     :param max_seq_length:
     :param tokenizer:
     :param mode:
     :return:
     """
-    label_map = {}
-    # 1表示从1开始对label进行index化
-    for (i, label) in enumerate(label_list, 1):
-        label_map[label] = i
-    # 保存label->index 的map
-    with codecs.open(os.path.join(FLAGS.output_dir, 'label2id.pkl'), 'wb') as w:
-        pickle.dump(label_map, w)
-    textlist = example.text.split(' ')
-    labellist = example.label.split(' ')
-    tokens = []
-    labels = []
-    for i, word in enumerate(textlist):
-        # 分词，如果是中文，就是分字
-        token = tokenizer.tokenize(word)
-        tokens.extend(token)
-        label_1 = labellist[i]
-        for m in range(len(token)):
-            if m == 0:
-                labels.append(label_1)
-            else:  # 一般不会出现else
-                labels.append("X")
-    # tokens = tokenizer.tokenize(example.text)
+    # label_map = {}
+    # # 1表示从1开始对label进行index化
+    # for (i, label) in enumerate(label_list, 1):
+    #     label_map[label] = i
+    # # 保存label->index 的map
+    # with codecs.open(os.path.join(FLAGS.output_dir, 'label2id.pkl'), 'wb') as w:
+    #     pickle.dump(label_map, w)
+
+    tokens = example.text.split(' ')
+    labels = example.label.split(' ')
+
+    # get label ids from labels
+    label_ids = list(map(lambda label: label_map[label], labels))
+
     # 序列截断
     if len(tokens) >= max_seq_length - 1:
         tokens = tokens[0:(max_seq_length - 2)]  # -2 的原因是因为序列需要加一个句首和句尾标志
-        labels = labels[0:(max_seq_length - 2)]
-    ntokens = []
+        label_ids = label_ids[0:(max_seq_length - 2)]
     segment_ids = []
-    label_ids = []
-    ntokens.append("[CLS]")  # 句子开始设置CLS 标志
-    segment_ids.append(0)
+    tokens.insert(0, "[CLS]")  # 句子开始设置CLS 标志
     # append("O") or append("[CLS]") not sure!
-    label_ids.append(label_map["[CLS]"])  # O OR CLS 没有任何影响，不过我觉得O 会减少标签个数,不过拒收和句尾使用不同的标志来标注，使用LCS 也没毛病
-    for i, token in enumerate(tokens):
-        ntokens.append(token)
-        segment_ids.append(0)
-        label_ids.append(label_map[labels[i]])
-    ntokens.append("[SEP]")  # 句尾添加[SEP] 标志
-    segment_ids.append(0)
+    label_ids.insert(0, label_map["[CLS]"])  # O OR CLS 没有任何影响，不过我觉得O 会减少标签个数,
+    # 不过句首和句尾使用不同的标志来标注，使用LCS 也没毛病
+    # for i, token in enumerate(tokens):
+    #     ntokens.append(token)
+    #     segment_ids.append(0)
+    #     label_ids.append(label_map[labels[i]])
+    tokens.append("[SEP]")  # 句尾添加[SEP] 标志
+
     # append("O") or append("[SEP]") not sure!
     label_ids.append(label_map["[SEP]"])
-    input_ids = tokenizer.convert_tokens_to_ids(ntokens)  # 将序列中的字(ntokens)转化为ID形式
+    input_ids = tokenizer.convert_tokens_to_ids(tokens)  # 将序列中的字(tokens)转化为ID形式
     input_mask = [1] * len(input_ids)
     # label_mask = [1] * len(input_ids)
     # padding, 使用
@@ -309,8 +315,9 @@ def convert_single_example(ex_index, example, label_list, max_seq_length, tokeni
         segment_ids.append(0)
         # we don't concerned about it!
         label_ids.append(0)
-        ntokens.append("**NULL**")
+        # ntokens.append("**NULL**")
         # label_mask.append(0)
+    segment_ids = [0] * max_seq_length
     # print(len(input_ids))
     assert len(input_ids) == max_seq_length
     assert len(input_mask) == max_seq_length
@@ -329,7 +336,10 @@ def convert_single_example(ex_index, example, label_list, max_seq_length, tokeni
         tf.logging.info("segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
         tf.logging.info("label_ids: %s" % " ".join([str(x) for x in label_ids]))
         # tf.logging.info("label_mask: %s" % " ".join([str(x) for x in label_mask]))
-
+    else:
+        tf.logging.info("guid: %s" % (example.guid))
+        # tf.logging.info("tokens: %s" % " ".join(
+        #     [tokenization.printable_text(x) for x in tokens]))
     # 结构化为一个类
     feature = InputFeatures(
         input_ids=input_ids,
@@ -339,17 +349,17 @@ def convert_single_example(ex_index, example, label_list, max_seq_length, tokeni
         # label_mask = label_mask
     )
     # mode='test'的时候才有效
-    write_tokens(ntokens, mode)
+    write_tokens(tokens, mode)
     return feature
 
 
 def filed_based_convert_examples_to_features(
-        examples, label_list, max_seq_length, tokenizer, output_file, mode=None
+        examples, label_map, max_seq_length, tokenizer, output_file, mode=None
 ):
     """
     将数据转化为TF_Record 结构，作为模型数据输入
     :param examples:  样本
-    :param label_list:标签list
+    :param label_map:标签map
     :param max_seq_length: 预先设定的最大序列长度
     :param tokenizer: tokenizer 对象
     :param output_file: tf.record 输出路径
@@ -362,7 +372,8 @@ def filed_based_convert_examples_to_features(
         if ex_index % 5000 == 0:
             tf.logging.info("Writing example %d of %d" % (ex_index, len(examples)))
         # 对于每一个训练样本,
-        feature = convert_single_example(ex_index, example, label_list, max_seq_length, tokenizer, mode)
+        feature = convert_single_example(ex_index, example, label_map, max_seq_length,
+                                         tokenizer, mode)
 
         def create_int_feature(values):
             f = tf.train.Feature(int64_list=tf.train.Int64List(value=list(values)))
@@ -376,6 +387,7 @@ def filed_based_convert_examples_to_features(
         # features["label_mask"] = create_int_feature(feature.label_mask)
         # tf.train.Example/Feature 是一种协议，方便序列化？？？
         tf_example = tf.train.Example(features=tf.train.Features(feature=features))
+
         writer.write(tf_example.SerializeToString())
 
 
@@ -447,7 +459,7 @@ def create_model(bert_config, is_training, input_ids, input_mask,
     blstm_crf = BLSTM_CRF(embedded_chars=embedding, hidden_unit=FLAGS.lstm_size, cell_type=FLAGS.cell, num_layers=FLAGS.num_layers,
                           dropout_rate=FLAGS.droupout_rate, initializers=initializers, num_labels=num_labels,
                           seq_length=max_seq_length, labels=labels, lengths=lengths, is_training=is_training)
-    rst = blstm_crf.add_blstm_crf_layer(crf_only=False)
+    rst = blstm_crf.add_blstm_crf_layer(crf_only=FLAGS.crf_only)
     return rst
 
 
@@ -467,7 +479,7 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
     :return:
     """
 
-    def model_fn(features, labels, mode, params):
+    def model_fn(features,  mode, params):
         tf.logging.info("*** Features ***")
         for name in sorted(features.keys()):
             tf.logging.info("  name = %s, shape = %s" % (name, features[name].shape))
@@ -586,21 +598,21 @@ def main(_):
                 del_file(FLAGS.output_dir)
             except Exception as e:
                 print(e)
-                print('pleace remove the files of output dir and data.conf')
+                print('please remove the files of output dir and data_conf dir')
                 exit(-1)
         if os.path.exists(FLAGS.data_config_path):
             try:
                 os.remove(FLAGS.data_config_path)
             except Exception as e:
                 print(e)
-                print('pleace remove the files of output dir and data.conf')
+                print('please remove the files of output dir and data_conf dir')
                 exit(-1)
     task_name = FLAGS.task_name.lower()
     if task_name not in processors:
         raise ValueError("Task not found: %s" % (task_name))
     processor = processors[task_name]()
 
-    label_list = processor.get_labels()
+    label_map = processor.get_label_map()
 
     tokenizer = tokenization.FullTokenizer(
         vocab_file=FLAGS.vocab_file, do_lower_case=FLAGS.do_lower_case)
@@ -616,6 +628,7 @@ def main(_):
         master=FLAGS.master,
         model_dir=FLAGS.output_dir,
         save_checkpoints_steps=FLAGS.save_checkpoints_steps,
+        log_step_count_steps=20,
         tpu_config=tf.contrib.tpu.TPUConfig(
             iterations_per_loop=FLAGS.iterations_per_loop,
             num_shards=FLAGS.num_tpu_cores,
@@ -625,8 +638,9 @@ def main(_):
     num_train_steps = None
     num_warmup_steps = None
 
-    if os.path.exists(FLAGS.data_config_path):
-        with codecs.open(FLAGS.data_config_path) as fd:
+    data_config_file = os.path.join(FLAGS.data_config_path, 'data.config')
+    if os.path.exists(data_config_file):
+        with codecs.open(data_config_file) as fd:
             data_config = json.load(fd)
     else:
         data_config = {}
@@ -649,7 +663,7 @@ def main(_):
     # tf 新的架构方法，通过定义model_fn 函数，定义模型，然后通过EstimatorAPI进行模型的其他工作，Es就可以控制模型的训练，预测，评估工作等。
     model_fn = model_fn_builder(
         bert_config=bert_config,
-        num_labels=len(label_list) + 1,
+        num_labels=len(label_map) + 1,
         init_checkpoint=FLAGS.init_checkpoint,
         learning_rate=FLAGS.learning_rate,
         num_train_steps=num_train_steps,
@@ -667,13 +681,17 @@ def main(_):
 
     if FLAGS.do_train:
         # 1. 将数据转化为tf_record 数据
-        if data_config.get('train.tf_record_path', '') == '':
-            train_file = os.path.join(FLAGS.output_dir, "train.tf_record")
+        if not os.path.exists(os.path.join(FLAGS.data_config_path, "train.tf_record")):
+            train_file = os.path.join(FLAGS.data_config_path, "train.tf_record")
             filed_based_convert_examples_to_features(
-                train_examples, label_list, FLAGS.max_seq_length, tokenizer, train_file)
+                train_examples, label_map, FLAGS.max_seq_length, tokenizer, train_file)
+            data_config['train.tf_record_path'] = train_file
+
+        # tf_records already exists, load from disk
         else:
-            train_file = data_config.get('train.tf_record_path')
-        num_train_size = num_train_size = int(data_config['num_train_size'])
+            train_file = os.path.join(FLAGS.data_config_path, "train.tf_record")
+
+        num_train_size = int(data_config['num_train_size'])
         tf.logging.info("***** Running training *****")
         tf.logging.info("  Num examples = %d", num_train_size)
         tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
@@ -691,7 +709,7 @@ def main(_):
             eval_examples = processor.get_dev_examples(FLAGS.data_dir)
             eval_file = os.path.join(FLAGS.output_dir, "eval.tf_record")
             filed_based_convert_examples_to_features(
-                eval_examples, label_list, FLAGS.max_seq_length, tokenizer, eval_file)
+                eval_examples, label_map, FLAGS.max_seq_length, tokenizer, eval_file)
             data_config['eval.tf_record_path'] = eval_file
             data_config['num_eval_size'] = len(eval_examples)
         else:
@@ -735,7 +753,7 @@ def main(_):
 
         predict_examples = processor.get_test_examples(FLAGS.data_dir)
         predict_file = os.path.join(FLAGS.output_dir, "predict.tf_record")
-        filed_based_convert_examples_to_features(predict_examples, label_list,
+        filed_based_convert_examples_to_features(predict_examples, label_map,
                                                  FLAGS.max_seq_length, tokenizer,
                                                  predict_file, mode="test")
 

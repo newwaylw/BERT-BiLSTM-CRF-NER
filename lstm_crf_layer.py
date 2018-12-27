@@ -130,7 +130,7 @@ class BLSTM_CRF(object):
                 pred = tf.nn.xw_plus_b(hidden, W, b)
             return tf.reshape(pred, [-1, self.seq_length, self.num_labels])
 
-    def project_crf_layer(self, embedding_chars, name=None):
+    def project_crf_layer(self, embedded_chars, name=None):
         """
         hidden layer between input layer and logits
         :param lstm_outputs: [batch_size, num_steps, emb_size] 
@@ -143,7 +143,7 @@ class BLSTM_CRF(object):
 
                 b = tf.get_variable("b", shape=[self.num_labels], dtype=tf.float32,
                                     initializer=tf.zeros_initializer())
-                output = tf.reshape(self.embedded_chars, shape=[-1, self.embedding_dims]) #[batch_size, embedding_dims]
+                output = tf.reshape(embedded_chars, shape=[-1, self.embedding_dims]) #[batch_size, embedding_dims]
                 pred = tf.tanh(tf.nn.xw_plus_b(output, W, b))
             return tf.reshape(pred, [-1, self.seq_length, self.num_labels])
 
